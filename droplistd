@@ -1,0 +1,145 @@
+#!/bin/bash
+# -----------------------------------------------------------------------------
+# droplistd
+#
+#              A service maintaining an iptables blocklist for IP pre-filtering
+#                                            https://github.com/inselc/droplist
+# -----------------------------------------------------------------------------
+
+# -- Configuration ------------------------------------------------------------
+# Redirect iptables calls
+IPTABLES="/sbin/iptables"
+# Unix socket receiving commands
+SOCKET_PATH="/var/run/droplist.sock"
+# Chain name for droplist entries (will be created automatically)
+CHAIN_NAME="droplist"
+# Chain name to append the droplist to
+INPUT_CHAIN="INPUT"
+# Cache directory for downloaded lists
+CACHE_PATH="/var/cache/droplist"
+# Filter action for blocked IPs
+FILTER_ACTION="DROP"
+# Rate limiting interval in seconds
+RATE_LIMIT=3600
+# URL to download the IP lists from (spamhaus DROP / EDROP)
+DROPLIST_URL="www.spamhaus.org/drop/drop.lasso"
+
+# -- Common Routines ----------------------------------------------------------
+# Check, whether the last update is within the rate-limit interval
+check_rate_limit()
+{
+    if [ -f $CACHE_PATH/timestamp -a -f $CACHE_PATH/processed ]; then
+        # Check last time fetched
+        TIMESTAMP_LAST=`cat $CACHE_PATH/timestamp`
+        TIMESTAMP_NOW=`date +%s`
+        TIME_DELTA=$(($TIMESTAMP_NOW - $TIMESTAMP_LAST))
+
+        # Check if timedelta is greater than minimum interval (seconds)
+        if [ $TIME_DELTA -lt $RATE_LIMIT ]; then
+            echo "Rate limit (last fetch $TIME_DELTA seconds ago)"
+            false
+        else
+            true
+        fi
+    else
+        # No data available; probably good to go
+        true
+    fi
+}
+
+# Function to clear or initialise the droplist-maintained chain
+init_chain()
+{
+    $IPTABLES -L $CHAIN_NAME -n >/dev/null
+    if [ $? -eq 0 ]; then
+        # Drop old rules
+        echo "Clearing chain $CHAIN_NAME"
+        $IPTABLES -F $CHAIN_NAME
+    else
+        # Create new chain, append to INPUT and FORWARD
+        echo "Creating new chain $CHAIN_NAME"
+        $IPTABLES -N $CHAIN_NAME
+        $IPTABLES -I $INPUT_CHAIN -j $CHAIN_NAME
+    fi
+}
+
+# Fetch droplist file from URL and pre-process
+fetch_droplist_cache()
+{
+    wget -q $DROPLIST_URL -O $CACHE_PATH/raw
+    if [ $? -eq 0 ]; then
+        echo "Updating droplist cache"
+        date +%s > $CACHE_PATH/timestamp
+        cat $CACHE_PATH/raw | grep -v '^;' | awk '{ print $1 }' > $CACHE_PATH/processed
+    else
+        false
+    fi
+}
+
+# Update iptables rules from processed file
+update_table_rules()
+{
+    init_chain
+    NUM_RULES=`cat $CACHE_PATH/processed | wc -l`
+    echo "Updating $NUM_RULES rules"
+    for BADNET in $(cat $CACHE_PATH/processed); do
+        $IPTABLES -A $CHAIN_NAME -s $BADNET -j $FILTER_ACTION
+    done
+}
+
+# Delete chains for shutdown
+delete_chain()
+{
+    echo "Removing reference to $CHAIN_NAME from $INPUT_CHAIN"
+    $IPTABLES -D $INPUT_CHAIN -j $CHAIN_NAME
+
+    echo "Flushing and deleting chain $CHAIN_NAME"
+    $IPTABLES -F $CHAIN_NAME
+    $IPTABLES -X $CHAIN_NAME
+}
+
+# -- Main script start --------------------------------------------------------
+# Init cache dir
+mkdir -p $CACHE_PATH
+
+# Initialse chain and update cache if necessary
+check_rate_limit && fetch_droplist_cache
+update_table_rules
+
+# Start listening on unix socket for update requests
+echo "Starting socket"
+RUN_STATUS=1
+while [ $RUN_STATUS -gt 0 ]; do
+    COMMAND=`socat UNIX-LISTEN:$SOCKET_PATH -`
+    
+    echo "Command received: $COMMAND"
+
+    case "$COMMAND" in
+        reload-cache)
+            echo "Reloading droplist from cache..."
+            update_table_rules
+            ;;
+
+        force-update)
+            echo "Forcing droplist update..."
+            fetch_droplist_cache && update_table_rules
+            ;;
+
+        update)
+            echo "Updating droplist..."
+            check_rate_limit && fetch_droplist_cache && update_table_rules
+            ;;
+
+        stop)
+            echo "Stopping droplistd..."
+            RUN_STATUS=0
+            ;;
+
+        *)
+            echo "Ignoring invalid command..."
+            ;;
+    esac
+done
+
+delete_chain || echo "ERROR: Could not delete chain!"
+echo "droplistd stopped"

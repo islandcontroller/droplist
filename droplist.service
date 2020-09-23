@@ -1,0 +1,15 @@
+[Unit]
+Description=Droplist Service
+After=network.target fail2ban.service
+PartOf=iptables.service firewalld.service ip6tables.service ipset.service
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=1
+User=root
+ExecStart=/opt/droplist/droplistd
+ExecStop=/bin/bash -c "/opt/droplist/droplist_cmd stop && sleep 4"
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,5 @@
+#!/bin/bash
+
+SOCKET_PATH="/var/run/droplist.sock"
+
+echo "$1" | socat - UNIX-CLIENT:$SOCKET_PATH
