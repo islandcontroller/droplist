@@ -9,6 +9,8 @@
 # -- Configuration ------------------------------------------------------------
 # Redirect iptables calls
 IPTABLES="/sbin/iptables"
+# Redirect sendmail calls
+SENDMAIL="/usr/sbin/sendmail"
 # Unix socket receiving commands
 SOCKET_PATH="/var/run/droplist.sock"
 # Chain name for droplist entries (will be created automatically)
@@ -23,6 +25,16 @@ FILTER_ACTION="DROP"
 RATE_LIMIT=3600
 # URL to download the IP lists from (spamhaus DROP / EDROP)
 DROPLIST_URL="www.spamhaus.org/drop/drop.lasso"
+# Admin e-mail address to receive notifications
+ADMIN_EMAIL="root@localhost"
+# Local email to use as sender address
+SENDER_EMAIL="droplist@`head -n 1 /etc/mailname || head -n 1 /etc/hostname`"
+
+# -- Load configuration overrides from /etc/droplist --------------------------
+if [ -f "/etc/droplist/droplist.conf" ]; then
+    echo "Loading config overrides from /etc/droplist"
+    source /etc/droplist/droplist.conf
+fi
 
 # -- Common Routines ----------------------------------------------------------
 # Check, whether the last update is within the rate-limit interval
@@ -85,6 +97,7 @@ update_table_rules()
     for BADNET in $(cat $CACHE_PATH/processed); do
         $IPTABLES -A $CHAIN_NAME -s $BADNET -j $FILTER_ACTION
     done
+    echo -e "`get_email_headers 'Rules updated'`Droplist updated its ruleset with $NUM_RULES processed entries.\n\n--- Processed list ---\n`cat $CACHE_PATH/processed`\n" | send_email_notif
 }
 
 # Delete chains for shutdown
@@ -98,6 +111,18 @@ delete_chain()
     $IPTABLES -X $CHAIN_NAME
 }
 
+# Create headers for e-mail message. Subject in $1
+get_email_headers()
+{
+    echo "Subject: [droplist] $1\nDate: `LC_ALL=C date +"%a, %d %h %Y %T %z"`\nFrom: droplist <$SENDER_EMAIL>\nTo: $ADMIN_EMAIL\n\n"
+}
+
+# Send E-Mail notification
+send_email_notif()
+{
+    $SENDMAIL -f $SENDER_EMAIL $ADMIN_EMAIL >/dev/null 2>&1
+}
+
 # -- Main script start --------------------------------------------------------
 # Init cache dir
 mkdir -p $CACHE_PATH
@@ -108,6 +133,8 @@ update_table_rules
 
 # Start listening on unix socket for update requests
 echo "Starting socket"
+echo -e "`get_email_headers 'Started'`Droplist service started.\n" | send_email_notif
+
 RUN_STATUS=1
 while [ $RUN_STATUS -gt 0 ]; do
     COMMAND=`socat UNIX-LISTEN:$SOCKET_PATH -`
@@ -143,3 +170,4 @@ done
 
 delete_chain || echo "ERROR: Could not delete chain!"
 echo "droplistd stopped"
+echo -e "`get_email_headers 'Stopped'`Droplist service stopped.\n" | send_email_notif
